@@ -28,6 +28,17 @@ class ParseStatusTest(unittest.TestCase):
                 "status Away"),
             "Away")
 
+    def test_multi_word_statuses(self):
+        # New Teams logs human-readable strings: "status Do not disturb"
+        self.assertEqual(
+            bridge.parse_status(SAMPLE.format(status="Do not disturb")),
+            "Do not disturb")
+        self.assertEqual(
+            bridge.parse_status(
+                "SetTaskbarIconOverlay overlay description:0 items, "
+                "status In a call"),
+            "In a call")
+
     def test_non_status_lines(self):
         self.assertIsNone(bridge.parse_status(
             "TaskbarBadgeServicePackaged: Setting badge NoBadge"))
@@ -36,12 +47,15 @@ class ParseStatusTest(unittest.TestCase):
         self.assertIsNone(bridge.parse_status(""))
 
     def test_busy_classification(self):
-        for status in ("Busy", "DoNotDisturb", "InACall", "InAMeeting",
-                       "OnThePhone", "Presenting", "InAConferenceCall"):
-            self.assertIn(status, bridge.BUSY_STATUSES)
-        for status in ("Available", "Away", "BeRightBack", "Offline",
-                       "Unknown"):
-            self.assertNotIn(status, bridge.BUSY_STATUSES)
+        for status in ("Busy", "DoNotDisturb", "Do not disturb",
+                       "do not disturb", "InACall", "In a call",
+                       "InAMeeting", "In a meeting", "OnThePhone",
+                       "Presenting", "InAConferenceCall"):
+            self.assertTrue(bridge.is_busy_status(status), status)
+        for status in ("Available", "Away", "BeRightBack",
+                       "Be right back", "Appear offline", "Offline",
+                       "Unknown", ""):
+            self.assertFalse(bridge.is_busy_status(status), status)
 
 
 class LogFileTest(unittest.TestCase):

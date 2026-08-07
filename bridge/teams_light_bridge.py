@@ -140,13 +140,20 @@ async def heartbeat() -> None:
 # recent builds; if a Teams update ever changes it, the bridge simply
 # stops seeing matches and the light shows free/idle instead of stale red.
 
-STATUS_RE = re.compile(r"SetTaskbarIconOverlay.*status (\w+)")
+# The status is human-readable and may contain spaces ("Do not disturb",
+# "In a call"), so capture to end of line and classify on a normalized
+# (lowercased, letters-only) form.
+STATUS_RE = re.compile(r"SetTaskbarIconOverlay.*status (.+?)\s*$")
 
 BUSY_STATUSES = {
-    "Busy", "BusyIdle", "DoNotDisturb", "DoNotDisturbIdle",
-    "InACall", "InAConferenceCall", "InAMeeting", "OnThePhone",
-    "Presenting",
+    "busy", "busyidle", "donotdisturb", "donotdisturbidle",
+    "inacall", "inaconferencecall", "inameeting", "onthephone",
+    "presenting",
 }
+
+
+def is_busy_status(status: str) -> bool:
+    return re.sub(r"[^a-z]", "", status.lower()) in BUSY_STATUSES
 
 
 def teams_log_dir() -> Path:
@@ -200,7 +207,7 @@ async def teams_log_listener() -> None:
     status = initial_status(log_dir)
     if status:
         log.info("Teams presence at startup: %s", status)
-        await set_teams_busy(status in BUSY_STATUSES, f"presence {status}")
+        await set_teams_busy(is_busy_status(status), f"presence {status}")
     else:
         log.info("No Teams presence found yet (is Teams running?)")
 
@@ -230,7 +237,7 @@ async def teams_log_listener() -> None:
                     break
                 status = parse_status(line) or status
             if status:
-                await set_teams_busy(status in BUSY_STATUSES,
+                await set_teams_busy(is_busy_status(status),
                                      f"presence {status}")
             await asyncio.sleep(LOG_POLL_SECONDS)
     finally:
