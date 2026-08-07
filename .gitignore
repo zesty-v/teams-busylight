@@ -1,0 +1,8 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local state — never commit
+bridge/teams_token.txt
+bridge/bridge.log*
+esp8266/teams_busylight/wifi_credentials.h
