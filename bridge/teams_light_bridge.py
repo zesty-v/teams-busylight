@@ -41,7 +41,7 @@ import urllib.request
 from pathlib import Path
 
 # ------------------------- configuration -------------------------
-ESP_HOST = "192.168.2.26"       # IP address of the ESP8266 light
+ESP_HOST = "192.168.2.4"        # IP address of the ESP8266 light
 IDLE_AFTER_SECONDS = 300        # no input for this long -> orange
 HEARTBEAT_SECONDS = 10          # push at least this often (ESP watchdog relies on it)
 RECONNECT_MAX_SECONDS = 60      # cap for websocket reconnect backoff
