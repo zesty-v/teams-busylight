@@ -140,10 +140,17 @@ async def heartbeat() -> None:
 # recent builds; if a Teams update ever changes it, the bridge simply
 # stops seeing matches and the light shows free/idle instead of stale red.
 
-# The status is human-readable and may contain spaces ("Do not disturb",
-# "In a call"), so capture to end of line and classify on a normalized
-# (lowercased, letters-only) form.
-STATUS_RE = re.compile(r"SetTaskbarIconOverlay.*status (.+?)\s*$")
+# Primary signal (new Teams, still present after web-client updates that
+# broke the taskbar-overlay format in Aug 2026): the native module logs
+# every presence change per signed-in cloud/account, e.g.
+#   ... UserDataCrossCloudModule: Received Action: UserPresenceAction:
+#       {cloud_context: https://teams.microsoft.com, availability: Busy}
+PRESENCE_ACTION_RE = re.compile(
+    r"UserPresenceAction: \{cloud_context: ([^,]+), availability: ([A-Za-z]+)")
+
+# Legacy signal (older web client builds): taskbar overlay with a
+# human-readable status, possibly multi-word ("Do not disturb").
+OVERLAY_RE = re.compile(r"SetTaskbarIconOverlay.*status (.+?)\s*$")
 
 BUSY_STATUSES = {
     "busy", "busyidle", "donotdisturb", "donotdisturbidle",
@@ -154,6 +161,27 @@ BUSY_STATUSES = {
 
 def is_busy_status(status: str) -> bool:
     return re.sub(r"[^a-z]", "", status.lower()) in BUSY_STATUSES
+
+
+def parse_presence(line: str) -> tuple[str, str] | None:
+    """Return (cloud, status) for a presence log line, else None.
+
+    Teams can be signed in to several accounts (work + personal); each
+    reports presence for its own cloud_context. Legacy overlay lines
+    carry no cloud and get the pseudo-cloud "taskbar-overlay".
+    """
+    m = PRESENCE_ACTION_RE.search(line)
+    if m:
+        return m.group(1), m.group(2)
+    m = OVERLAY_RE.search(line)
+    if m:
+        return "taskbar-overlay", m.group(1)
+    return None
+
+
+def any_busy(clouds: dict[str, str]) -> bool:
+    """Busy if any signed-in account reports a busy-ish presence."""
+    return any(is_busy_status(status) for status in clouds.values())
 
 
 def teams_log_dir() -> Path:
@@ -175,39 +203,46 @@ def newest_log(log_dir: Path) -> Path | None:
         return None
 
 
-def last_status_in_file(path: Path) -> str | None:
-    status = None
+def scan_file(path: Path, clouds: dict[str, str]) -> None:
+    """Feed every presence line of a log file into the per-cloud state."""
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
-                status = parse_status(line) or status
+                parsed = parse_presence(line)
+                if parsed:
+                    clouds[parsed[0]] = parsed[1]
     except OSError:
         pass
-    return status
 
 
-def initial_status(log_dir: Path, max_files: int = 3) -> str | None:
-    """Most recent presence in the newest few log files (newest first)."""
+def initial_clouds(log_dir: Path, max_files: int = 3) -> dict[str, str]:
+    """Replay the newest few log files (oldest first) into cloud state."""
     try:
         files = sorted(log_dir.glob("MSTeams_*.log"),
                        key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
-        return None
-    for path in files[:max_files]:
-        status = last_status_in_file(path)
-        if status:
-            return status
-    return None
+        return {}
+    clouds: dict[str, str] = {}
+    for path in reversed(files[:max_files]):
+        scan_file(path, clouds)
+    return clouds
+
+
+def describe(clouds: dict[str, str]) -> str:
+    return ", ".join(
+        f"{status} ({cloud.removeprefix('https://')})"
+        for cloud, status in sorted(clouds.items())) or "none"
 
 
 async def teams_log_listener() -> None:
     log_dir = teams_log_dir()
     log.info("Watching Teams logs in %s", log_dir)
 
-    status = initial_status(log_dir)
-    if status:
-        log.info("Teams presence at startup: %s", status)
-        await set_teams_busy(is_busy_status(status), f"presence {status}")
+    clouds = initial_clouds(log_dir)
+    if clouds:
+        log.info("Teams presence at startup: %s", describe(clouds))
+        await set_teams_busy(any_busy(clouds),
+                             f"presence {describe(clouds)}")
     else:
         log.info("No Teams presence found yet (is Teams running?)")
 
@@ -226,7 +261,7 @@ async def teams_log_listener() -> None:
                     log.info("Teams log rotated -> %s", newest.name)
                 current = newest
 
-            status = None
+            changed = False
             while f:
                 pos = f.tell()
                 line = f.readline()
@@ -235,10 +270,13 @@ async def teams_log_listener() -> None:
                 if not line.endswith("\n"):
                     f.seek(pos)  # partial line still being written
                     break
-                status = parse_status(line) or status
-            if status:
-                await set_teams_busy(is_busy_status(status),
-                                     f"presence {status}")
+                parsed = parse_presence(line)
+                if parsed:
+                    clouds[parsed[0]] = parsed[1]
+                    changed = True
+            if changed:
+                await set_teams_busy(any_busy(clouds),
+                                     f"presence {describe(clouds)}")
             await asyncio.sleep(LOG_POLL_SECONDS)
     finally:
         if f:

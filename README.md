@@ -224,9 +224,15 @@ the bridge in the repo, run `bridge/sync-to-windows.sh` again.
   from a browser on the PC.
 - **Light never turns red (log-tailing source)** — check
   `bridge.log`: if the presence lines stopped matching after a Teams
-  update, the `SetTaskbarIconOverlay` format may have changed; grep the
-  newest `%LOCALAPPDATA%\Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Logs\MSTeams_*.log`
-  for `status ` and adjust `STATUS_RE` / `BUSY_STATUSES`.
+  update (its web client updates itself silently, independent of the
+  app version), the log format may have changed; grep the newest
+  `%LOCALAPPDATA%\Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Logs\MSTeams_*.log`
+  for `availability` / `status ` and adjust `PRESENCE_ACTION_RE`,
+  `OVERLAY_RE` or `BUSY_STATUSES`. This happened once already: an
+  Aug 2026 web-client update dropped the status from the
+  `SetTaskbarIconOverlay` lines; the bridge now primarily parses
+  `UserPresenceAction: {cloud_context: ..., availability: ...}`, which
+  is also per-account — busy on any signed-in account wins.
 - **Briefly red right after the bridge starts** — the startup scan can
   pick up a stale presence from log history; Teams re-broadcasts presence
   within a minute or two and the light self-corrects.
