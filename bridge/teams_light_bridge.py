@@ -5,9 +5,11 @@ Teams busy-light bridge.
 Watches Microsoft Teams for busy/free state, adds keyboard/mouse idle
 detection, and pushes the combined state to an ESP8266 light over the LAN:
 
-    busy  -> red    (in a Teams meeting/call, or presence Busy/DND)
+    busy  -> red    (on a real call — Teams/WhatsApp holding the mic —
+                     or presence explicitly Do not disturb)
     idle  -> orange (no keyboard/mouse input for IDLE_AFTER_SECONDS)
-    free  -> green
+    free  -> green  (calendar "Busy"/"In a meeting" deliberately stays
+                     green: it outlives meetings that finish early)
 
 Two Teams sources, picked automatically at startup:
 
@@ -46,6 +48,18 @@ IDLE_AFTER_SECONDS = 300        # no input for this long -> orange
 HEARTBEAT_SECONDS = 10          # push at least this often (ESP watchdog relies on it)
 RECONNECT_MAX_SECONDS = 60      # cap for websocket reconnect backoff
 LOG_POLL_SECONDS = 1.0          # how often the log tailer looks for new lines
+MIC_POLL_SECONDS = 2.0          # how often to check microphone use
+
+# Packaged (MSIX) apps whose microphone use means "on a call". Windows
+# tracks per-app mic use in the ConsentStore registry key; while an app
+# holds the mic its LastUsedTimeStop is 0. Muting inside the app doesn't
+# release the mic, so a muted call still counts as busy.
+MIC_APPS = {
+    "MSTeams_8wekyb3d8bbwe": "Teams",
+    "5319275A.WhatsAppDesktop_cv1g1gvanyjgm": "WhatsApp",
+}
+MIC_CONSENT_KEY = (r"SOFTWARE\Microsoft\Windows\CurrentVersion"
+                   r"\CapabilityAccessManager\ConsentStore\microphone")
 
 APP_IDENTITY = {
     "protocol-version": "2.0.0",
@@ -60,7 +74,8 @@ BRIDGE_LOG_FILE = Path(__file__).with_name("bridge.log")
 
 log = logging.getLogger("bridge")
 
-teams_busy = False
+teams_busy = False              # presence says DND / in a call
+mic_busy = False                # a monitored app is holding the microphone
 pair_request_sent = False
 
 
@@ -93,7 +108,7 @@ else:
 
 
 def current_state() -> str:
-    if teams_busy:
+    if teams_busy or mic_busy:
         return "busy"
     if idle_seconds() >= IDLE_AFTER_SECONDS:
         return "idle"
@@ -119,6 +134,45 @@ async def set_teams_busy(busy: bool, reason: str) -> None:
         teams_busy = busy
         log.info("Teams: %s (%s)", "busy" if busy else "not busy", reason)
         await push_state(current_state())
+
+
+async def set_mic_busy(busy: bool, reason: str) -> None:
+    global mic_busy
+    if busy != mic_busy:
+        mic_busy = busy
+        log.info("Microphone: %s", reason)
+        await push_state(current_state())
+
+
+def mic_in_use_apps() -> list[str]:
+    """Names of monitored apps currently holding the microphone."""
+    import winreg  # Windows-only, imported lazily
+
+    active = []
+    for package, name in MIC_APPS.items():
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                MIC_CONSENT_KEY + "\\" + package) as key:
+                stop, _ = winreg.QueryValueEx(key, "LastUsedTimeStop")
+        except OSError:
+            continue  # app not installed / never used the mic
+        if stop == 0:
+            active.append(name)
+    return active
+
+
+async def mic_watcher() -> None:
+    if sys.platform != "win32":
+        log.info("Mic watcher disabled (not Windows)")
+        return
+    log.info("Watching microphone use by: %s", ", ".join(MIC_APPS.values()))
+    while True:
+        apps = await asyncio.to_thread(mic_in_use_apps)
+        if apps:
+            await set_mic_busy(True, "in use by " + ", ".join(apps))
+        else:
+            await set_mic_busy(False, "released")
+        await asyncio.sleep(MIC_POLL_SECONDS)
 
 
 async def heartbeat() -> None:
@@ -152,10 +206,14 @@ PRESENCE_ACTION_RE = re.compile(
 # human-readable status, possibly multi-word ("Do not disturb").
 OVERLAY_RE = re.compile(r"SetTaskbarIconOverlay.*status (.+?)\s*$")
 
+# Presence that turns the light red: explicit Do-not-disturb plus
+# unambiguous in-a-call statuses. Deliberately NOT "busy"/"in a meeting":
+# those are calendar-driven, so they keep the light red long after a
+# meeting that finished early — actual calls are caught by the mic
+# watcher instead.
 BUSY_STATUSES = {
-    "busy", "busyidle", "donotdisturb", "donotdisturbidle",
-    "inacall", "inaconferencecall", "inameeting", "onthephone",
-    "presenting",
+    "donotdisturb", "donotdisturbidle",
+    "inacall", "inaconferencecall", "onthephone", "presenting",
 }
 
 
@@ -372,7 +430,7 @@ async def main() -> None:
     else:
         log.info("Teams source: log tailing (third-party API not available)")
         source = teams_log_listener()
-    await asyncio.gather(heartbeat(), source)
+    await asyncio.gather(heartbeat(), source, mic_watcher())
 
 
 if __name__ == "__main__":

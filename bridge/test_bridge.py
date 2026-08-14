@@ -50,12 +50,16 @@ class ParsePresenceTest(unittest.TestCase):
         self.assertIsNone(bridge.parse_presence(""))
 
     def test_busy_classification(self):
-        for status in ("Busy", "DoNotDisturb", "Do not disturb",
-                       "do not disturb", "InACall", "In a call",
-                       "InAMeeting", "In a meeting", "OnThePhone",
-                       "Presenting", "InAConferenceCall"):
+        # Red: explicit DND and unambiguous in-a-call statuses.
+        for status in ("DoNotDisturb", "Do not disturb", "do not disturb",
+                       "DoNotDisturbIdle", "InACall", "In a call",
+                       "OnThePhone", "Presenting", "InAConferenceCall"):
             self.assertTrue(bridge.is_busy_status(status), status)
-        for status in ("Available", "Away", "BeRightBack",
+        # Not red: calendar-driven statuses (Busy, In a meeting) stay
+        # green — a calendar block outliving the actual meeting must not
+        # keep the light on. Real calls are caught by the mic watcher.
+        for status in ("Busy", "BusyIdle", "InAMeeting", "In a meeting",
+                       "Available", "Away", "BeRightBack",
                        "Be right back", "Appear offline", "Offline",
                        "PresenceUnknown", "Unknown", ""):
             self.assertFalse(bridge.is_busy_status(status), status)
@@ -64,8 +68,11 @@ class ParsePresenceTest(unittest.TestCase):
         self.assertFalse(bridge.any_busy({}))
         self.assertFalse(bridge.any_busy(
             {"https://teams.microsoft.com": "Available"}))
-        self.assertTrue(bridge.any_busy(
+        self.assertFalse(bridge.any_busy(
             {"https://teams.microsoft.com": "Busy",
+             "https://teams.live.com": "Available"}))
+        self.assertTrue(bridge.any_busy(
+            {"https://teams.microsoft.com": "DoNotDisturb",
              "https://teams.live.com": "Available"}))
 
 
@@ -95,17 +102,18 @@ class LogFileTest(unittest.TestCase):
         self.assertIsNone(bridge.newest_log(self.dir / "does-not-exist"))
 
     def test_initial_clouds_tracks_per_cloud(self):
-        # Work went Busy, then personal went Available afterwards: the
-        # work Busy must survive (any_busy stays True).
+        # Work went DND, then personal went Available afterwards: the
+        # work DND must survive (any_busy stays True).
         self._write(
             "MSTeams_a.log",
             ACTION.format(cloud="https://teams.microsoft.com",
-                          status="Busy"),
+                          status="DoNotDisturb"),
             ACTION.format(cloud="https://teams.live.com",
                           status="Available"))
         clouds = bridge.initial_clouds(self.dir)
-        self.assertEqual(clouds, {"https://teams.microsoft.com": "Busy",
-                                  "https://teams.live.com": "Available"})
+        self.assertEqual(clouds,
+                         {"https://teams.microsoft.com": "DoNotDisturb",
+                          "https://teams.live.com": "Available"})
         self.assertTrue(bridge.any_busy(clouds))
 
     def test_initial_clouds_later_line_wins_per_cloud(self):

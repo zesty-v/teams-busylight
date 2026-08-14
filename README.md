@@ -1,7 +1,8 @@
 # Teams Busy Light
 
 A traffic light for your door: **green** = free, **orange** = idle/away,
-**red** = in a Teams call. No Azure, no cloud — everything runs on your PC
+**red** = do not disturb: on a real call (Teams or WhatsApp) or presence
+set to Do not disturb. No Azure, no cloud — everything runs on your PC
 and your LAN.
 
 ```
@@ -15,17 +16,23 @@ and your LAN.
 ```
 
 - `bridge/teams_light_bridge.py` — runs on the Windows machine that runs
-  Teams. Watches Teams for busy/free state, checks the OS keyboard/mouse
-  idle timer, and pushes `free | idle | busy` to the ESP8266. It has two
-  Teams sources and picks one automatically at startup:
-  - **Third-party app API websocket** (`ws://localhost:8124`) — used when
-    Teams exposes it. Reports in-call state only. Needs one-time pairing.
-  - **Log tailing** — used when port 8124 is closed (Microsoft gates the
-    API behind a server-side ECS flag, `thirdPartyDevicesManagerEnabled`,
-    which is off for many accounts and also hides the Settings toggle).
-    The bridge then follows the presence Teams writes to its own log
-    files (`SetTaskbarIconOverlay ... status <X>`): a call, "Busy" or
-    "Do not disturb" all turn the light red. No pairing needed.
+  Teams. Combines two "do not disturb me" signals, checks the OS
+  keyboard/mouse idle timer, and pushes `free | idle | busy` to the
+  ESP8266:
+  - **Real calls, any app** — Windows records which apps hold the
+    microphone (`ConsentStore` registry); the bridge polls it for Teams
+    and WhatsApp Desktop. Red within seconds of a call starting, green
+    within seconds of hanging up — being muted in the call makes no
+    difference. Deliberately *not* driven by calendar presence: a
+    meeting slot that outlives the actual call keeps presence "Busy",
+    but never the light.
+  - **Explicit Do not disturb** — from Teams presence, via one of two
+    sources picked automatically at startup: the **third-party app API
+    websocket** (`ws://localhost:8124`, needs one-time pairing; Microsoft
+    gates it behind a server-side ECS flag that is off for many accounts
+    and also hides its Settings toggle) or, when that port is closed,
+    **tailing Teams' own log files** for presence lines. No pairing
+    needed for log tailing.
 - `esp8266/teams_busylight/teams_busylight.ino` — Arduino sketch. Serves a
   tiny website showing the current state, accepts state updates, drives
   the GPIO pins. If no update arrives for 60 s it goes dark with a short
@@ -222,7 +229,12 @@ the bridge in the repo, run `bridge/sync-to-windows.sh` again.
 - **Light stuck on NO SIGNAL** — the bridge isn't reaching the ESP: check
   it's running, check `ESP_HOST`, and try `http://<esp-ip>/set?state=free`
   from a browser on the PC.
-- **Light never turns red (log-tailing source)** — check
+- **Light doesn't go red during a call** — check `bridge.log` for
+  `Microphone: in use by ...` lines while calling. If they're missing,
+  the app may not be in `MIC_APPS` (classic non-Store installs live
+  under the registry's `NonPackaged` subkey and need their exe path
+  there instead of a package family name).
+- **DND doesn't turn the light red (log-tailing source)** — check
   `bridge.log`: if the presence lines stopped matching after a Teams
   update (its web client updates itself silently, independent of the
   app version), the log format may have changed; grep the newest
@@ -255,9 +267,16 @@ the bridge in the repo, run `bridge/sync-to-windows.sh` again.
 
 ## Notes
 
-- With the websocket source, calls answered on your phone won't trigger
-  the light — the local API only sees the desktop client. The log-tailing
-  source follows presence, which usually does reflect mobile calls.
+- Calls answered on your phone won't trigger the light — the PC's
+  microphone isn't in use and the local API only sees the desktop
+  client. Set Do not disturb if you need the light red during a mobile
+  call.
+- Setting your status to plain "Busy" doesn't turn the light red (it's
+  indistinguishable from calendar-driven busy); use "Do not disturb"
+  when you explicitly want the red light.
+- Other call apps can be added to the mic watcher by putting their
+  package family name (see `Get-AppxPackage` in PowerShell) into
+  `MIC_APPS`.
 - Both Teams sources are community-documented rather than officially
   published; if a Teams update ever changes the format, the failsafe
   means the light goes to NO SIGNAL (or free) rather than lying.
